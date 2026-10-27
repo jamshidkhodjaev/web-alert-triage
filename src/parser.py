@@ -45,7 +45,7 @@ def parse_access_logs(path=DEFAULT_LOG_PATH, stats=None):
     line_number identifies evidence even when a record_id cannot be recovered.
     File access errors propagate to the caller; row errors remain in results.
     """
-    with open(path, encoding="utf-8", newline="") as source:
+    with open(path, encoding="utf-8", errors="surrogateescape", newline="") as source:
         for line_number, raw_line in enumerate(source, start=1):
             if not raw_line.strip():
                 if stats is not None:
@@ -60,6 +60,8 @@ def parse_access_logs(path=DEFAULT_LOG_PATH, stats=None):
                 "diagnostic": None,
             }
             try:
+                if any(0xDC80 <= ord(char) <= 0xDCFF for char in raw_line):
+                    raise json.JSONDecodeError("Invalid UTF-8 input bytes", raw_line, 0)
                 record = json.loads(raw_line)
             except json.JSONDecodeError as exc:
                 result["diagnostic"] = f"Invalid JSON: {exc.msg}"
@@ -81,44 +83,50 @@ def parse_access_logs(path=DEFAULT_LOG_PATH, stats=None):
 def filter_logs_for_alert(
     log_path=DEFAULT_LOG_PATH, alert_path=DEFAULT_ALERT_PATH, window_minutes=5
 ):
-    """Return matches within an inclusive +/- window and separate diagnostics.
-
-    Invalid log rows cannot be placed in the window, so retain them separately.
-    An invalid alert or window raises ValueError rather than guessing a time.
-    """
-    if not math.isfinite(window_minutes) or window_minutes < 0:
-        raise ValueError("Window minutes must be finite and non-negative")
-    with open(alert_path, encoding="utf-8") as source:
-        alert = json.load(source)
-    if not isinstance(alert, dict) or "timestamp" not in alert:
-        raise ValueError("Alert must be a JSON object with a timestamp")
-    alert_timestamp = parse_timestamp(alert["timestamp"])
+    """Retain input failures and evidence so every triage can generate artifacts."""
+    alert = {}
+    alert_error = None
+    alert_timestamp = start = end = None
+    notes = []
     try:
+        with open(alert_path, encoding="utf-8") as source:
+            alert = json.load(source)
+        if not isinstance(alert, dict):
+            alert = {}
+            raise ValueError("Alert must be a JSON object")
+        alert_timestamp = parse_timestamp(alert.get("timestamp"))
+        if not math.isfinite(window_minutes) or window_minutes < 0:
+            raise ValueError("Window minutes must be finite and non-negative")
         window = timedelta(minutes=window_minutes)
-        start = alert_timestamp - window
-        end = alert_timestamp + window
-    except OverflowError as exc:
-        raise ValueError("Time window exceeds the supported datetime range") from exc
-
-    matches = []
-    diagnostics = []
+        start, end = alert_timestamp - window, alert_timestamp + window
+        # Proposal expiry must also fit in the supported datetime range.
+        alert_timestamp + timedelta(hours=24)
+    except (OSError, ValueError, OverflowError) as exc:
+        alert_error = f"Alert error: {exc}"
+        alert_timestamp = start = end = None
+    for key, fallback in (("alert_id", "unknown-alert"), ("rule_name", "Unknown Rule")):
+        if not isinstance(alert.get(key), str) or not alert[key].strip():
+            alert[key] = fallback
+            notes.append(f"Missing or invalid {key}; using {fallback}.")
+    matches, diagnostics = [], []
     excluded_count = 0
     stats = {"blank_lines_skipped": 0}
-    for result in parse_access_logs(log_path, stats):
-        if result["diagnostic"] is not None:
-            diagnostics.append(result)
-        elif start <= result["parsed_timestamp"] <= end:
-            matches.append(result)
-        else:
-            excluded_count += 1
+    input_error = None
+    try:
+        for result in parse_access_logs(log_path, stats):
+            if result["diagnostic"] is not None:
+                diagnostics.append(result)
+            elif alert_error or start <= result["parsed_timestamp"] <= end:
+                matches.append(result)
+            else:
+                excluded_count += 1
+    except (OSError, UnicodeError) as exc:
+        input_error = f"Log input error: {exc}"
     return {
-        "alert": alert,
-        "alert_timestamp": alert_timestamp,
-        "window_start": start,
-        "window_end": end,
-        "records": matches,
-        "diagnostics": diagnostics,
-        "excluded_count": excluded_count,
+        "alert": alert, "alert_error": alert_error, "input_error": input_error,
+        "uncertainty_notes": notes, "alert_timestamp": alert_timestamp,
+        "window_start": start, "window_end": end, "records": matches,
+        "diagnostics": diagnostics, "excluded_count": excluded_count,
         "blank_lines_skipped": stats["blank_lines_skipped"],
     }
 
@@ -130,35 +138,49 @@ def allowlist_ip(value):
         raise argparse.ArgumentTypeError("expected an exact IPv4 or IPv6 address (no CIDR)") from exc
 
 
-if __name__ == "__main__":
-    cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument("--window-minutes", type=float, default=5,
-                     help="Minutes before and after the alert (default: 5)")
+class TriageArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
+
+
+def main(argv=None):
+    cli = TriageArgumentParser(description=__doc__)
+    cli.add_argument("--window-minutes", type=float, default=5)
     cli.add_argument("--alert", type=Path, default=DEFAULT_ALERT_PATH)
     cli.add_argument("--logs", type=Path, default=DEFAULT_LOG_PATH)
     cli.add_argument("--allowlist-ip", action="append", default=[], type=allowlist_ip,
-                     help="Suppress proposals for this exact IP (repeat for multiple IPs)")
-    args = cli.parse_args()
+                     help="Exact IP address; repeat for multiple addresses (no CIDR)")
+    cli.add_argument("--output-dir", type=Path, default=DEFAULT_LOG_PATH.parent.parent / "examples")
     try:
+        args = cli.parse_args(argv)
         filtered = filter_logs_for_alert(args.logs, args.alert, args.window_minutes)
-    except (OSError, ValueError) as exc:
-        cli.exit(1, f"Verdict: insufficient data\nUnable to filter logs: {exc}\n")
-    for result in filtered["diagnostics"]:
-        print(
-            f"Warning: record_id={result['record_id']!r}, "
-            f"line={result['line_number']}: {result['diagnostic']}"
-        )
-    print(f"Window (inclusive): {filtered['window_start'].isoformat()} "
-          f"to {filtered['window_end'].isoformat()}")
-    print(f"Successfully parsed records within window: {len(filtered['records'])}")
-    print(f"Records outside window: {filtered['excluded_count']}")
-    print(f"Records with diagnostic warnings (time unknown): {len(filtered['diagnostics'])}")
+    except ValueError as exc:
+        # Recover the destination even if another argument fails validation.
+        destination = TriageArgumentParser(add_help=False)
+        destination.add_argument("--output-dir", type=Path, default=DEFAULT_LOG_PATH.parent.parent / "examples")
+        try:
+            recovered, _ = destination.parse_known_args(argv)
+            output_dir = recovered.output_dir
+        except ValueError:
+            output_dir = DEFAULT_LOG_PATH.parent.parent / "examples"
+        args = argparse.Namespace(output_dir=output_dir, allowlist_ip=[])
+        filtered = filter_logs_for_alert()
+        filtered.update(alert_error=f"Argument error: {exc}", alert_timestamp=None,
+                        window_start=None, window_end=None)
+
     decision = evaluate_alert(filtered)
+    print(f"Verdict: {decision['verdict']}")
     try:
-        report_path, proposal_path = write_artifacts(filtered, decision, args.allowlist_ip)
-    except (OSError, ValueError, OverflowError, KeyError) as exc:
-        cli.exit(1, f"Unable to generate triage artifacts: {exc}\n")
-    # Datetimes live in retained evidence; serialize those as ISO 8601 for the CLI.
+        report_path, proposal_path = write_artifacts(
+            filtered, decision, args.allowlist_ip, args.output_dir)
+    except OSError as exc:
+        print(f"Unable to write triage artifacts: {exc}")
+        return 1
     print(json.dumps(decision, indent=2, default=lambda value: value.isoformat()))
     print(f"Report: {report_path}")
     print(f"Dry-run response proposal: {proposal_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

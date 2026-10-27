@@ -25,7 +25,9 @@ def build_response_proposal(filtered, decision, allowlist=()):
             or not decision["supporting_evidence_record_ids"]):
         return None
     alert = filtered["alert"]
-    identity = {key: alert[key] for key in ("alert_id", "source_ip", "rule_name")}
+    identity = {"alert_id": alert.get("alert_id", "unknown-alert"),
+                "source_ip": alert.get("source_ip"),
+                "rule_name": alert.get("rule_name", "Unknown Rule")}
     serialized = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     action_id = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     expires = filtered["alert_timestamp"].astimezone(timezone.utc) + timedelta(hours=24)
@@ -57,6 +59,10 @@ def _cell(value):
     return text.replace("\r", "&#13;").replace("\n", "<br>")
 
 
+def _time(value):
+    return value.isoformat() if value is not None else "unknown (alert timestamp invalid)"
+
+
 def render_report(filtered, decision, proposal):
     alert = filtered["alert"]
     rows = [row for row in decision["analyzed_records"] if not row["diagnostic"]]
@@ -70,8 +76,8 @@ def render_report(filtered, decision, proposal):
         "# Web Triage Report", "", "## Executive Summary", "",
         f"Alert **{_cell(alert.get('alert_id'))}** — {_cell(alert.get('rule_name'))}.", "",
         f"Source: {_cell(alert.get('source_ip'))}; destination: {_cell(alert.get('destination_host'))}.", "",
-        f"Alert time: {filtered['alert_timestamp'].isoformat()}. "
-        f"Inclusive window: {filtered['window_start'].isoformat()} to {filtered['window_end'].isoformat()}.", "",
+        f"Alert time: {_time(filtered['alert_timestamp'])}. "
+        f"Inclusive window: {_time(filtered['window_start'])} to {_time(filtered['window_end'])}.", "",
         f"{len(rows)} valid correlated records; {len(diagnostics)} retained diagnostic records; "
         f"{filtered['excluded_count']} valid records outside the time window.", "",
         f"{filtered.get('blank_lines_skipped', 0)} blank lines skipped.", "",
@@ -97,7 +103,7 @@ def render_report(filtered, decision, proposal):
                   "| Record ID | Line | Diagnostic | Original raw line (JSON string) |",
                   "| --- | --- | --- | --- |"])
     for number, (row, diagnostic) in sorted(diagnostics.items()):
-        values = [row["record_id"], number, diagnostic, json.dumps(row["raw_line"], ensure_ascii=False)]
+        values = [row["record_id"], number, diagnostic, json.dumps(row["raw_line"], ensure_ascii=True)]
         lines.append("| " + " | ".join(_cell(value) for value in values) + " |")
     if not diagnostics:
         lines.extend(["", "None."])

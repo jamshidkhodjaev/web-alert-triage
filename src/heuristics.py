@@ -108,7 +108,7 @@ def evaluate_alert(filtered):
     """
     alert = filtered["alert"]
     decisions = []
-    alert_error = None
+    alert_error = filtered.get("alert_error")
     try:
         if not isinstance(alert.get("source_ip"), str):
             raise ValueError()
@@ -117,7 +117,7 @@ def evaluate_alert(filtered):
             raise ValueError()
         host = alert["destination_host"].lower().rstrip(".")
     except ValueError:
-        alert_error = "Alert source IP or destination host is missing or invalid."
+        alert_error = alert_error or "Alert source IP or destination host is missing or invalid."
 
     uncorrelated_count = 0
     for row in filtered["records"] + filtered["diagnostics"]:
@@ -147,18 +147,21 @@ def evaluate_alert(filtered):
         supporting = []
     elif supporting:
         verdict = "suspicious attempt"
-    elif not decisions or corrupted:
+    elif not decisions or corrupted or filtered.get("input_error"):
         verdict = "insufficient data"
     else:
         verdict = "no supporting evidence"
     notes = list(dict.fromkeys(d["uncertainty_note"] for d in decisions))
+    notes.extend(filtered.get("uncertainty_notes", []))
+    if filtered.get("input_error"):
+        notes.append(filtered["input_error"])
     if alert_error:
         notes.insert(0, alert_error)
     elif not decisions:
         notes.append("No logs match the alert source IP and host within the time window.")
     return {
         "uncorrelated_count": uncorrelated_count,
-        "alert_id": alert.get("alert_id"),
+        "alert_id": alert.get("alert_id", "unknown-alert"),
         "verdict": verdict,
         "supporting_evidence_record_ids": supporting,
         "analyzed_records": decisions,
