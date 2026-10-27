@@ -8,8 +8,10 @@ from pathlib import Path
 
 if __package__:
     from .heuristics import evaluate_alert
+    from .reporter import write_artifacts
 else:
     from heuristics import evaluate_alert
+    from reporter import write_artifacts
 
 
 DEFAULT_LOG_PATH = Path(__file__).resolve().parents[1] / "fixtures/access_logs.jsonl"
@@ -34,8 +36,8 @@ def parse_timestamp(value):
         raise ValueError("Malformed Timestamp: outside UTC datetime range") from exc
 
 
-def parse_access_logs(path=DEFAULT_LOG_PATH):
-    """Yield one result per line, including invalid JSON and blank lines.
+def parse_access_logs(path=DEFAULT_LOG_PATH, stats=None):
+    """Yield one result per line, including invalid JSON; count and skip whitespace-only lines.
 
     Each result retains the unchanged decoded raw_record and exact raw_line.
     parsed_timestamp is None on failure; diagnostic describes that failure.
@@ -44,6 +46,10 @@ def parse_access_logs(path=DEFAULT_LOG_PATH):
     """
     with open(path, encoding="utf-8", newline="") as source:
         for line_number, raw_line in enumerate(source, start=1):
+            if not raw_line.strip():
+                if stats is not None:
+                    stats["blank_lines_skipped"] = stats.get("blank_lines_skipped", 0) + 1
+                continue
             result = {
                 "record_id": None,
                 "line_number": line_number,
@@ -96,7 +102,8 @@ def filter_logs_for_alert(
     matches = []
     diagnostics = []
     excluded_count = 0
-    for result in parse_access_logs(log_path):
+    stats = {"blank_lines_skipped": 0}
+    for result in parse_access_logs(log_path, stats):
         if result["diagnostic"] is not None:
             diagnostics.append(result)
         elif start <= result["parsed_timestamp"] <= end:
@@ -111,6 +118,7 @@ def filter_logs_for_alert(
         "records": matches,
         "diagnostics": diagnostics,
         "excluded_count": excluded_count,
+        "blank_lines_skipped": stats["blank_lines_skipped"],
     }
 
 
@@ -120,6 +128,8 @@ if __name__ == "__main__":
                      help="Minutes before and after the alert (default: 5)")
     cli.add_argument("--alert", type=Path, default=DEFAULT_ALERT_PATH)
     cli.add_argument("--logs", type=Path, default=DEFAULT_LOG_PATH)
+    cli.add_argument("--allowlist-ip", action="append", default=[],
+                     help="Suppress proposals for this exact IP (repeat for multiple IPs)")
     args = cli.parse_args()
     try:
         filtered = filter_logs_for_alert(args.logs, args.alert, args.window_minutes)
@@ -136,5 +146,11 @@ if __name__ == "__main__":
     print(f"Records outside window: {filtered['excluded_count']}")
     print(f"Records with diagnostic warnings (time unknown): {len(filtered['diagnostics'])}")
     decision = evaluate_alert(filtered)
+    try:
+        report_path, proposal_path = write_artifacts(filtered, decision, args.allowlist_ip)
+    except (OSError, ValueError, OverflowError, KeyError) as exc:
+        cli.exit(1, f"Unable to generate triage artifacts: {exc}\n")
     # Datetimes live in retained evidence; serialize those as ISO 8601 for the CLI.
     print(json.dumps(decision, indent=2, default=lambda value: value.isoformat()))
+    print(f"Report: {report_path}")
+    print(f"Dry-run response proposal: {proposal_path}")

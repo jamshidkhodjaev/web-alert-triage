@@ -5,8 +5,16 @@ from ipaddress import ip_address
 from urllib.parse import unquote
 
 
-TRAVERSAL = re.compile(r"(?:\.|%2e){2}(?:/|\\|%2f|%5c)", re.IGNORECASE)
+TRAVERSAL = re.compile(
+    r"(?:^|(?<=[/\\=?&;#])|(?<=%2f)|(?<=%5c))"
+    r"(?:\.|%2e){2}(?:/|\\|%2f|%5c|(?=$|[?&;#]))", re.IGNORECASE
+)
 BAD_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
+
+
+def normalize_ip(value):
+    address = ip_address(value)
+    return getattr(address, "ipv4_mapped", None) or address
 
 
 def normalize_path(raw_path):
@@ -14,12 +22,17 @@ def normalize_path(raw_path):
     if not isinstance(raw_path, str) or not raw_path:
         raise ValueError("Missing or invalid path")
     normalized = raw_path
+    invalid_encoding = False
     for _ in range(2):
-        decoded = unquote(normalized, errors="strict")
+        try:
+            decoded = unquote(normalized, errors="strict")
+        except UnicodeError:
+            decoded = unquote(normalized, errors="replace")
+            invalid_encoding = True
         if decoded == normalized:
             break
         normalized = decoded
-    return {"raw_path": raw_path, "normalized_path": normalized}
+    return {"raw_path": raw_path, "normalized_path": normalized, "invalid_encoding": invalid_encoding}
 
 
 def analyze_record(result):
@@ -36,9 +49,12 @@ def analyze_record(result):
         "normalized_path": None,
         "diagnostic": result["diagnostic"],
         "evidence": result,
+        "warnings": [],
+        "invalid_encoding": False,
+        "inconclusive": False,
     }
     errors = [result["diagnostic"]] if result["diagnostic"] else []
-    for field in ("record_id", "destination_host", "method"):
+    for field in ("record_id", "destination_host"):
         if not isinstance(record.get(field), str) or not record[field].strip():
             errors.append(f"Missing or invalid {field}")
     try:
@@ -47,18 +63,24 @@ def analyze_record(result):
         ip_address(record["source_ip"])
     except ValueError:
         errors.append("Missing or invalid source_ip")
+    if not isinstance(record.get("method"), str) or not record["method"].strip():
+        decision["warnings"].append("Missing or invalid method")
     status = record.get("status")
     if type(status) is not int or not 100 <= status <= 599:
-        errors.append("Missing or invalid HTTP status")
+        decision["warnings"].append("Missing or invalid HTTP status")
     try:
         decision.update(normalize_path(record.get("path")))
         decision["matched_indicators"] = list(dict.fromkeys(
             match.group() for match in TRAVERSAL.finditer(decision["normalized_path"])
         ))
         if BAD_ESCAPE.search(record["path"]):
-            errors.append("Malformed URL escape")
+            decision["warnings"].append("Malformed URL escape")
     except (ValueError, UnicodeError) as exc:
         errors.append(f"Invalid path: {exc}")
+    if decision["invalid_encoding"]:
+        decision["warnings"].append("Invalid UTF-8 URL encoding replaced")
+    residual_encoding = bool(re.search(r"%25(?:25)*2[eEfF]", decision["normalized_path"] or ""))
+    decision["inconclusive"] = (decision["invalid_encoding"] or residual_encoding) and not decision["matched_indicators"]
     if errors:
         decision["diagnostic"] = "; ".join(errors)
         decision["verdict_reason"] = "Critical fields corrupted: " + decision["diagnostic"]
@@ -90,31 +112,36 @@ def evaluate_alert(filtered):
     try:
         if not isinstance(alert.get("source_ip"), str):
             raise ValueError()
-        source_ip = ip_address(alert["source_ip"])
+        source_ip = normalize_ip(alert["source_ip"])
         if not isinstance(alert.get("destination_host"), str) or not alert["destination_host"].strip():
             raise ValueError()
         host = alert["destination_host"].lower().rstrip(".")
     except ValueError:
         alert_error = "Alert source IP or destination host is missing or invalid."
 
+    uncorrelated_count = 0
     for row in filtered["records"] + filtered["diagnostics"]:
         record = row["raw_record"]
         if not alert_error and isinstance(record, dict):
             # Exclude known nonmatching identities, but retain unknown identities.
             try:
                 candidate = record.get("source_ip")
-                if isinstance(candidate, str) and ip_address(candidate) != source_ip:
+                if isinstance(candidate, str) and normalize_ip(candidate) != source_ip:
+                    if not row["diagnostic"]:
+                        uncorrelated_count += 1
                     continue
             except ValueError:
                 pass
             candidate_host = record.get("destination_host")
             if isinstance(candidate_host, str) and candidate_host.strip() and candidate_host.lower().rstrip(".") != host:
+                if not row["diagnostic"]:
+                    uncorrelated_count += 1
                 continue
         decisions.append(analyze_record(row))
 
     supporting = [d["record_id"] for d in decisions
                   if d["matched_indicators"] and not d["diagnostic"]]
-    corrupted = any(d["diagnostic"] for d in decisions)
+    corrupted = any(d["diagnostic"] or d["inconclusive"] for d in decisions)
     if alert_error:
         verdict = "insufficient data"
         supporting = []
@@ -130,6 +157,7 @@ def evaluate_alert(filtered):
     elif not decisions:
         notes.append("No logs match the alert source IP and host within the time window.")
     return {
+        "uncorrelated_count": uncorrelated_count,
         "alert_id": alert.get("alert_id"),
         "verdict": verdict,
         "supporting_evidence_record_ids": supporting,
