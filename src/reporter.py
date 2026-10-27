@@ -53,7 +53,7 @@ def build_response_proposal(filtered, decision, allowlist=()):
 def _cell(value):
     """Escape untrusted log text for Markdown tables and prose."""
     text = "—" if value is None else str(value)
-    text = html.escape(text).replace("\\", "&#92;")
+    text = html.escape(text, quote=False).replace("\\", "\\\\")
     for char in ("|", "`", "*", "_", "[", "]"):
         text = text.replace(char, f"&#{ord(char)};")
     return text.replace("\r", "&#13;").replace("\n", "<br>")
@@ -113,7 +113,14 @@ def render_report(filtered, decision, proposal):
                   "- Request patterns and HTTP status codes do not establish confirmed compromise.",
                   "- Rows with invalid timestamps cannot be placed within the window.",
                   "- Response proposals are dry-run only; allowlisted sources are suppressed."])
-    lines.extend(f"- {_cell(note)}" for note in decision["uncertainty_notes"])
+    notes = [note for note in decision["uncertainty_notes"]
+             if note != "Bounded URI inspection cannot rule out other attacks or deeper encoding."]
+    existing = {line for line in lines if line.startswith("- ")}
+    for note in notes:
+        bullet = f"- {_cell(note)}"
+        if bullet not in existing:
+            lines.append(bullet)
+            existing.add(bullet)
     return "\n".join(lines) + "\n"
 
 
