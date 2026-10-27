@@ -6,6 +6,9 @@
   "evidence_ids": [
     "log-006"
   ],
+  "evidence_refs": [
+    "log-006@line:6"
+  ],
   "expires_at": "2026-10-28T12:02:30Z",
   "allowlist_result": "passed",
   "dry_run": true,

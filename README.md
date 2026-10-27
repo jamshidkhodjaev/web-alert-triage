@@ -24,7 +24,7 @@ python3 src/parser.py
 
 The application uses the Python standard library; `requirements.txt` provides `pytest` as an optional test runner.
 
-Choose a separate artifact directory with `--output-dir PATH` (default: `examples/`). Completed triage runs, including input failures, overwrite both artifacts so stale decisions do not remain. Invalid alert timestamps produce an `insufficient data` report and a null proposal. Exit code 0 means triage completed; exit code 1 means artifacts could not be written.
+Choose a separate artifact directory with `--output-dir PATH` (default: `examples/`). Completed triage runs, including input failures, refresh both artifacts and a hash-based completion marker. Failed publication invalidates the marker and removes or nulls the proposal where the filesystem permits; consumers must validate the marker and check the invocation exit status. Invalid alert timestamps produce an `insufficient data` report and a null proposal. Exit code 0 means triage or input-file failure reporting completed; exit code 1 means artifacts could not be prepared or published. Invalid CLI arguments exit 2 with a clear error: no new analysis is completed, inputs are not loaded, and outputs are not changed. Any existing outputs belong to an earlier run. Invalid custom inputs never load demo evidence as a fallback.
 
 ```bash
 python3 src/parser.py --output-dir /tmp/web-triage-output
@@ -43,10 +43,13 @@ Repeat `--allowlist-ip` to specify multiple exact IP addresses (no CIDR ranges).
 
 With the bundled fixtures, `alert-001` receives a **suspicious attempt** verdict supported by `log-006`, which requests `../../../etc/passwd` and receives HTTP 403. `log-008` is retained with a `Missing Timezone` diagnostic and cannot be reliably placed within the correlation window.
 
-Each successful run updates:
+Each completed run updates:
 
 - [`examples/report.md`](examples/report.md): executive summary, triage verdict, correlated evidence table, retained diagnostics, and limitations and uncertainties.
 - [`examples/response_proposal.json`](examples/response_proposal.json): a `block_ip` proposal for `192.0.2.42`, supported by `log-006`, with `dry_run: true` and `requires_human_approval: true`. The reason explicitly states that request success is not established and requires manual review. Its action ID is stable for the same alert ID, source IP, and rule name. The fixture's expiry is `2026-10-28T12:02:30Z`.
+- [`examples/completion.json`](examples/completion.json): SHA-256 hashes of both artifacts, published last. These separate replacements are not one atomic transaction.
+
+Supporting references now include input line numbers, such as `log-006@line:6`, to disambiguate duplicate record IDs. Proposals preserve `evidence_ids` and add authoritative `evidence_refs`.
 
 When there is no supported traversal attempt, the proposal file contains JSON `null`, replacing any previous proposal. No firewall or WAF changes are made.
 
@@ -58,9 +61,13 @@ Run the test suite from the repository root:
 python3 -m unittest discover -s tests -v
 ```
 
-The 42 tests cover single and double URL encoding, the two-pass ceiling, backslash and terminal traversal segments, benign lookalikes, malformed escapes and UTF-8, UTC offsets and window boundaries, IP/host correlation and IPv4-mapped IPv6, retained corrupt rows and skipped blanks, deterministic action IDs and artifacts, allowlist suppression, null proposals, alert defaults, CLI failure handling, stale-file replacement, Markdown escaping, and the verdict invariant. They use temporary files and leave the bundled fixtures unchanged.
+The 74 tests cover single and double URL encoding, the two-pass ceiling, backslash and terminal traversal segments, benign lookalikes, malformed escapes and UTF-8, UTC offsets and window boundaries, IP/host correlation and IPv4-mapped IPv6, retained corrupt rows and skipped blanks, stable action IDs that change with each identity field, exact 24-hour expiry after UTC normalization, deterministic artifacts, allowlist suppression, null proposals, alert defaults, CLI failure handling, stale-file replacement, Markdown escaping, and the verdict invariant. Additional review regressions cover custom input failures, unverifiable correlation, lone surrogates, duplicate IDs, excessive nesting and integers, residual backslash encoding, completion hashes, and injected preparation/replacement failures. They use temporary files and leave the bundled fixtures unchanged. Targeted mutation checks were also performed: increasing decoding from two to three passes and expiry from 24 to 48 hours each caused its regression test to fail; both mutations were restored.
 
-GitHub Actions runs the tests and the end-to-end parser on Ubuntu with Python 3.11 for pushes to `main` and pull requests targeting `main`. CI generates artifacts in a temporary directory and diffs both files against the committed examples.
+GitHub Actions runs the tests and the end-to-end parser on Ubuntu with Python 3.11 for pushes to `main` and pull requests targeting `main`. CI generates artifacts in a temporary directory and diffs all three files against the working-tree examples.
+
+## Contracts and failure behavior
+
+See [docs/contracts.md](docs/contracts.md) for field types and validation, timestamp/IP/host normalization, evidence references, proposal fields, parsing bounds, exit codes, and artifact publication semantics. JSON nesting is capped at 64 containers and integer literals at 4,300 digits. Invalid rows retain escaped original evidence and processing continues.
 
 ## Limitations
 
@@ -73,3 +80,4 @@ GitHub Actions runs the tests and the end-to-end parser on Ubuntu with Python 3.
 - Missing or corrupted critical fields limit correlation. Invalid timestamps are retained as diagnostics rather than assigned an assumed timezone.
 - IP, host, and time proximity provide correlation, not attribution or proof of causation. An IP address does not identify an individual.
 - The fixtures are synthetic. These results demonstrate triage behavior, not production detection coverage. Response proposals are for review only, and the tool never automatically assigns `confirmed compromise`.
+- Permission or storage failures can prevent cleanup; check exit status and completion hashes rather than trusting an old file. Use a separate output directory per concurrent run. No total file-size or memory limit is enforced.

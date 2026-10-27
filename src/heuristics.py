@@ -41,6 +41,8 @@ def analyze_record(result):
     record = record if isinstance(record, dict) else {}
     decision = {
         "record_id": result["record_id"],
+        "evidence_ref": f"{result['record_id']}@line:{result['line_number']}",
+        "correlation_status": "unverifiable",
         "matched_indicators": [],
         "http_status": record.get("status"),
         "verdict_reason": "",
@@ -49,7 +51,7 @@ def analyze_record(result):
         "normalized_path": None,
         "diagnostic": result["diagnostic"],
         "evidence": result,
-        "warnings": [],
+        "warnings": list(result.get("warnings", [])),
         "invalid_encoding": False,
         "inconclusive": False,
     }
@@ -79,8 +81,10 @@ def analyze_record(result):
         errors.append(f"Invalid path: {exc}")
     if decision["invalid_encoding"]:
         decision["warnings"].append("Invalid UTF-8 URL encoding replaced")
-    residual_encoding = bool(re.search(r"%25(?:25)*2[eEfF]", decision["normalized_path"] or ""))
+    residual_encoding = bool(re.search(r"%25(?:25)*(?:2e|2f|5c)", decision["normalized_path"] or "", re.IGNORECASE))
     decision["inconclusive"] = (decision["invalid_encoding"] or residual_encoding) and not decision["matched_indicators"]
+    if residual_encoding:
+        decision["warnings"].append("Traversal-related encoding remains beyond the two-pass limit")
     if errors:
         decision["diagnostic"] = "; ".join(errors)
         decision["verdict_reason"] = "Critical fields corrupted: " + decision["diagnostic"]
@@ -94,6 +98,9 @@ def analyze_record(result):
             if status == 403 else
             f"HTTP {status} alone does not establish payload execution or compromise; manual inspection is required."
         )
+    elif decision["inconclusive"]:
+        decision["verdict_reason"] = "Encoding uncertainty prevents ruling out traversal. Visible indicators were not found."
+        decision["uncertainty_note"] = "Invalid UTF-8 or residual traversal-related encoding requires manual inspection."
     else:
         decision["verdict_reason"] = "No traversal indicators detected after at most two URL decoding passes."
         decision["uncertainty_note"] = "Bounded URI inspection cannot rule out other attacks or deeper encoding."
@@ -120,7 +127,7 @@ def evaluate_alert(filtered):
         alert_error = alert_error or "Alert source IP or destination host is missing or invalid."
 
     uncorrelated_count = 0
-    for row in filtered["records"] + filtered["diagnostics"]:
+    for row in filtered["records"] + filtered["diagnostics"] + filtered.get("retained_records", []):
         record = row["raw_record"]
         if not alert_error and isinstance(record, dict):
             # Exclude known nonmatching identities, but retain unknown identities.
@@ -137,10 +144,15 @@ def evaluate_alert(filtered):
                 if not row["diagnostic"]:
                     uncorrelated_count += 1
                 continue
-        decisions.append(analyze_record(row))
+        analyzed = analyze_record(row)
+        if not alert_error and not analyzed["diagnostic"]:
+            analyzed["correlation_status"] = "correlated"
+        else:
+            analyzed["correlation_status"] = "unverifiable"
+        decisions.append(analyzed)
 
     supporting = [d["record_id"] for d in decisions
-                  if d["matched_indicators"] and not d["diagnostic"]]
+                  if d["matched_indicators"] and d["correlation_status"] == "correlated"]
     corrupted = any(d["diagnostic"] or d["inconclusive"] for d in decisions)
     if alert_error:
         verdict = "insufficient data"
@@ -164,6 +176,8 @@ def evaluate_alert(filtered):
         "alert_id": alert.get("alert_id", "unknown-alert"),
         "verdict": verdict,
         "supporting_evidence_record_ids": supporting,
+        "supporting_evidence_refs": [d["evidence_ref"] for d in decisions
+                                    if d["matched_indicators"] and d["correlation_status"] == "correlated"],
         "analyzed_records": decisions,
         "uncertainty_notes": notes,
     }

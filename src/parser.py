@@ -3,14 +3,17 @@
 import argparse
 import json
 import math
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from ipaddress import ip_address
 
 if __package__:
+    from .input_safety import bounded_json_loads
     from .heuristics import evaluate_alert
     from .reporter import write_artifacts
 else:
+    from input_safety import bounded_json_loads
     from heuristics import evaluate_alert
     from reporter import write_artifacts
 
@@ -62,9 +65,9 @@ def parse_access_logs(path=DEFAULT_LOG_PATH, stats=None):
             try:
                 if any(0xDC80 <= ord(char) <= 0xDCFF for char in raw_line):
                     raise json.JSONDecodeError("Invalid UTF-8 input bytes", raw_line, 0)
-                record = json.loads(raw_line)
-            except json.JSONDecodeError as exc:
-                result["diagnostic"] = f"Invalid JSON: {exc.msg}"
+                record = bounded_json_loads(raw_line)
+            except (ValueError, RecursionError) as exc:
+                result["diagnostic"] = f"Invalid JSON: {exc}"
             else:
                 result["raw_record"] = record
                 if not isinstance(record, dict):
@@ -88,9 +91,11 @@ def filter_logs_for_alert(
     alert_error = None
     alert_timestamp = start = end = None
     notes = []
+    raw_alert = ""
     try:
-        with open(alert_path, encoding="utf-8") as source:
-            alert = json.load(source)
+        with open(alert_path, encoding="utf-8", errors="surrogateescape") as source:
+            raw_alert = source.read()
+            alert = bounded_json_loads(raw_alert)
         if not isinstance(alert, dict):
             alert = {}
             raise ValueError("Alert must be a JSON object")
@@ -101,29 +106,42 @@ def filter_logs_for_alert(
         start, end = alert_timestamp - window, alert_timestamp + window
         # Proposal expiry must also fit in the supported datetime range.
         alert_timestamp + timedelta(hours=24)
-    except (OSError, ValueError, OverflowError) as exc:
+    except (OSError, ValueError, OverflowError, RecursionError) as exc:
         alert_error = f"Alert error: {exc}"
         alert_timestamp = start = end = None
     for key, fallback in (("alert_id", "unknown-alert"), ("rule_name", "Unknown Rule")):
         if not isinstance(alert.get(key), str) or not alert[key].strip():
             alert[key] = fallback
             notes.append(f"Missing or invalid {key}; using {fallback}.")
-    matches, diagnostics = [], []
+    matches, diagnostics, retained = [], [], []
     excluded_count = 0
     stats = {"blank_lines_skipped": 0}
     input_error = None
+    seen_ids = {}
     try:
         for result in parse_access_logs(log_path, stats):
+            identity = result["record_id"]
+            if isinstance(identity, str):
+                seen_ids.setdefault(identity, []).append(result)
             if result["diagnostic"] is not None:
                 diagnostics.append(result)
-            elif alert_error or start <= result["parsed_timestamp"] <= end:
+            elif alert_error:
+                retained.append(result)
+            elif start <= result["parsed_timestamp"] <= end:
                 matches.append(result)
             else:
                 excluded_count += 1
     except (OSError, UnicodeError) as exc:
         input_error = f"Log input error: {exc}"
+    for identity, duplicates in seen_ids.items():
+        if len(duplicates) > 1:
+            for row in duplicates:
+                row.setdefault("warnings", []).append(
+                    "Duplicate record_id; use evidence_ref with input line number")
     return {
         "alert": alert, "alert_error": alert_error, "input_error": input_error,
+        "raw_alert": raw_alert, "retained_records": retained,
+        "input_context": {"alert": str(alert_path), "logs": str(log_path)},
         "uncertainty_notes": notes, "alert_timestamp": alert_timestamp,
         "window_start": start, "window_end": end, "records": matches,
         "diagnostics": diagnostics, "excluded_count": excluded_count,
@@ -138,6 +156,18 @@ def allowlist_ip(value):
         raise argparse.ArgumentTypeError("expected an exact IPv4 or IPv6 address (no CIDR)") from exc
 
 
+def window_minutes(value):
+    try:
+        minutes = float(value)
+        if not math.isfinite(minutes) or minutes < 0:
+            raise ValueError()
+        timedelta(minutes=minutes)
+    except (ValueError, OverflowError) as exc:
+        raise argparse.ArgumentTypeError(
+            "expected finite, non-negative minutes within the supported range") from exc
+    return minutes
+
+
 class TriageArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         raise ValueError(message)
@@ -145,7 +175,7 @@ class TriageArgumentParser(argparse.ArgumentParser):
 
 def main(argv=None):
     cli = TriageArgumentParser(description=__doc__)
-    cli.add_argument("--window-minutes", type=float, default=5)
+    cli.add_argument("--window-minutes", type=window_minutes, default=5)
     cli.add_argument("--alert", type=Path, default=DEFAULT_ALERT_PATH)
     cli.add_argument("--logs", type=Path, default=DEFAULT_LOG_PATH)
     cli.add_argument("--allowlist-ip", action="append", default=[], type=allowlist_ip,
@@ -153,20 +183,13 @@ def main(argv=None):
     cli.add_argument("--output-dir", type=Path, default=DEFAULT_LOG_PATH.parent.parent / "examples")
     try:
         args = cli.parse_args(argv)
-        filtered = filter_logs_for_alert(args.logs, args.alert, args.window_minutes)
     except ValueError as exc:
-        # Recover the destination even if another argument fails validation.
-        destination = TriageArgumentParser(add_help=False)
-        destination.add_argument("--output-dir", type=Path, default=DEFAULT_LOG_PATH.parent.parent / "examples")
-        try:
-            recovered, _ = destination.parse_known_args(argv)
-            output_dir = recovered.output_dir
-        except ValueError:
-            output_dir = DEFAULT_LOG_PATH.parent.parent / "examples"
-        args = argparse.Namespace(output_dir=output_dir, allowlist_ip=[])
-        filtered = filter_logs_for_alert()
-        filtered.update(alert_error=f"Argument error: {exc}", alert_timestamp=None,
-                        window_start=None, window_end=None)
+        cli.print_usage(file=sys.stderr)
+        print(f"{cli.prog}: error: {exc}", file=sys.stderr)
+        print("No new analysis was completed. Existing outputs belong to an earlier run; "
+              "no inputs were loaded and no outputs were changed.", file=sys.stderr)
+        return 2
+    filtered = filter_logs_for_alert(args.logs, args.alert, args.window_minutes)
 
     decision = evaluate_alert(filtered)
     print(f"Verdict: {decision['verdict']}")

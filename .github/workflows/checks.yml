@@ -35,3 +35,4 @@ jobs:
           python3 src/parser.py --output-dir "$RUNNER_TEMP/out"
           diff examples/report.md "$RUNNER_TEMP/out/report.md"
           diff examples/response_proposal.json "$RUNNER_TEMP/out/response_proposal.json"
+          diff examples/completion.json "$RUNNER_TEMP/out/completion.json"
