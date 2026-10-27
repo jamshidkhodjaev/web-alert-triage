@@ -5,6 +5,7 @@ import json
 import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from ipaddress import ip_address
 
 if __package__:
     from .heuristics import evaluate_alert
@@ -122,13 +123,20 @@ def filter_logs_for_alert(
     }
 
 
+def allowlist_ip(value):
+    try:
+        return str(ip_address(value))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected an exact IPv4 or IPv6 address (no CIDR)") from exc
+
+
 if __name__ == "__main__":
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--window-minutes", type=float, default=5,
                      help="Minutes before and after the alert (default: 5)")
     cli.add_argument("--alert", type=Path, default=DEFAULT_ALERT_PATH)
     cli.add_argument("--logs", type=Path, default=DEFAULT_LOG_PATH)
-    cli.add_argument("--allowlist-ip", action="append", default=[],
+    cli.add_argument("--allowlist-ip", action="append", default=[], type=allowlist_ip,
                      help="Suppress proposals for this exact IP (repeat for multiple IPs)")
     args = cli.parse_args()
     try:

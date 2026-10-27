@@ -4,7 +4,10 @@ import hashlib
 import html
 import json
 from datetime import timedelta, timezone
-from ipaddress import ip_address
+if __package__:
+    from .heuristics import normalize_ip
+else:
+    from heuristics import normalize_ip
 from pathlib import Path
 
 
@@ -17,7 +20,7 @@ def build_response_proposal(filtered, decision, allowlist=()):
     The allowlist contains exact IP addresses. Its result is independent of the
     detection verdict. Canonical JSON and SHA-256 make the action ID repeatable.
     """
-    allowed = {ip_address(value) for value in allowlist}
+    allowed = {normalize_ip(value) for value in allowlist}
     if (decision["verdict"] != "suspicious attempt"
             or not decision["supporting_evidence_record_ids"]):
         return None
@@ -26,16 +29,18 @@ def build_response_proposal(filtered, decision, allowlist=()):
     serialized = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     action_id = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     expires = filtered["alert_timestamp"].astimezone(timezone.utc) + timedelta(hours=24)
+    suppressed = normalize_ip(alert["source_ip"]) in allowed
     return {
         "action_id": action_id,
         "target_ip": alert["source_ip"],
-        "proposed_action": "block_ip",
-        "reason": "Path traversal attempt detected in correlated web logs.",
+        "proposed_action": "none" if suppressed else "block_ip",
+        "reason": "Path traversal attempt observed in correlated web logs; success of the request is not established and requires manual review.",
         "evidence_ids": list(decision["supporting_evidence_record_ids"]),
         "expires_at": expires.isoformat().replace("+00:00", "Z"),
-        "allowlist_result": "suppressed" if ip_address(alert["source_ip"]) in allowed else "passed",
+        "allowlist_result": "suppressed" if suppressed else "passed",
         "dry_run": True,
-        "rollback_instruction": (
+        "requires_human_approval": True,
+        "rollback_instruction": "No block is proposed because the source is allowlisted; no rollback is needed." if suppressed else (
             f"If this proposal was manually applied, remove the deny rule for {alert['source_ip']} "
             f"associated with action {action_id} from the firewall or WAF, then verify access is restored. "
             "This dry run changes no rules."
@@ -73,7 +78,7 @@ def render_report(filtered, decision, proposal):
         f"{decision.get('uncorrelated_count', 0)} in-window records not correlated (different IP/host)", "",
         "## Triage Verdict", "", f"**{_cell(decision['verdict'])}**", "",
         "Supporting evidence IDs: " + (_cell(", ".join(decision["supporting_evidence_record_ids"])) or "None") + ".", "",
-        (f"Dry-run block proposal: allowlist check **{proposal['allowlist_result']}**; "
+        ("No block is proposed because the source is allowlisted." if proposal and proposal["allowlist_result"] == "suppressed" else f"Dry-run block proposal: allowlist check **{proposal['allowlist_result']}**; "
          f"expires {proposal['expires_at']}. No action was executed."
          if proposal else "No response proposed: no supported traversal attempt. The proposal file contains JSON null."),
         "", "## Correlated Evidence Table", "",
