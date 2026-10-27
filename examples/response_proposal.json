@@ -1,0 +1,14 @@
+{
+  "action_id": "1cf2f3801096779e6f1a55d47c35949e30c9e7d3c3a965253db4a513df63b18f",
+  "target_ip": "192.0.2.42",
+  "proposed_action": "block_ip",
+  "reason": "Path traversal attempt observed in correlated web logs; success of the request is not established and requires manual review.",
+  "evidence_ids": [
+    "log-006"
+  ],
+  "expires_at": "2026-10-28T12:02:30Z",
+  "allowlist_result": "passed",
+  "dry_run": true,
+  "requires_human_approval": true,
+  "rollback_instruction": "If this proposal was manually applied, remove the deny rule for 192.0.2.42 associated with action 1cf2f3801096779e6f1a55d47c35949e30c9e7d3c3a965253db4a513df63b18f from the firewall or WAF, then verify access is restored. This dry run changes no rules."
+}
