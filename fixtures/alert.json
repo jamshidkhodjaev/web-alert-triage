@@ -1,0 +1,7 @@
+{
+  "alert_id": "alert-001",
+  "timestamp": "2026-10-27T12:02:30Z",
+  "source_ip": "192.0.2.42",
+  "destination_host": "web.example.test",
+  "rule_name": "Suspicious URI Pattern"
+}

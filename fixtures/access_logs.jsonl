@@ -1,0 +1,10 @@
+{"record_id":"log-001","timestamp":"2026-10-27T12:00:00Z","source_ip":"198.51.100.10","destination_host":"web.example.test","method":"GET","path":"/","status":200}
+{"record_id":"log-002","timestamp":"2026-10-27T12:00:30Z","source_ip":"192.0.2.42","destination_host":"web.example.test","method":"GET","path":"/products","status":200}
+{"record_id":"log-003","timestamp":"2026-10-27T12:01:00Z","source_ip":"198.51.100.20","destination_host":"web.example.test","method":"GET","path":"/search?q=hello%20world&page=2","status":200}
+{"record_id":"log-004","timestamp":"2026-10-27T12:01:30Z","source_ip":"192.0.2.42","destination_host":"web.example.test","method":"GET","path":"/download?file=guide.pdf","status":200}
+{"record_id":"log-005","timestamp":"2026-10-27T12:02:00Z","source_ip":"203.0.113.15","destination_host":"api.example.test","method":"POST","path":"/api/session","status":201}
+{"record_id":"log-006","timestamp":"2026-10-27T12:02:30Z","source_ip":"192.0.2.42","destination_host":"web.example.test","method":"GET","path":"/download?file=../../../etc/passwd","status":403}
+{"record_id":"log-007","timestamp":"2026-10-27T12:03:00Z","source_ip":"198.51.100.10","destination_host":"web.example.test","method":"GET","path":"/assets/main.css","status":200}
+{"record_id":"log-008","timestamp":"2026-10-27T12:03:30","source_ip":"192.0.2.42","destination_host":"web.example.test","method":"GET","path":"/help","status":200}
+{"record_id":"log-009","timestamp":"2026-10-27T12:04:00Z","source_ip":"203.0.113.25","destination_host":"web.example.test","method":"GET","path":"/favicon.ico","status":404}
+{"record_id":"log-010","timestamp":"2026-10-27T12:05:00Z","source_ip":"198.51.100.20","destination_host":"web.example.test","method":"GET","path":"/contact","status":200}
